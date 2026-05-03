@@ -7,7 +7,7 @@ Works with Inphic and other "INSTANT USB GAMING MOUSE" devices (vendor `30fa`, p
 ## Install
 
 ```bash
-git clone <this-repo>
+git clone https://github.com/tcc3281/mouse-config.git
 cd mouse-config
 sudo ./install.sh   # sets up udev rules, uinput module, and systemd service
 ```
