@@ -1,0 +1,34 @@
+# Inphic Mouse Button Configuration
+# Edit this file and restart the service to change bindings:
+#   systemctl --user restart mouse-config
+
+devices:
+  - name: "INSTANT USB GAMING MOUSE"
+    vendor: "30fa"
+    product: "1701"
+    buttons:
+      # Side button (near thumb, back position)
+      BTN_SIDE:
+        type: key_combo
+        keys: [KEY_LEFTCTRL, KEY_V]
+
+      # Extra side button (near thumb, front position)
+      BTN_EXTRA:
+        type: key_combo
+        keys: [KEY_LEFTCTRL, KEY_C]
+
+      # Uncomment to customize further buttons:
+      #
+      # BTN_MIDDLE:
+      #   type: key_combo
+      #   keys: [KEY_LEFTCTRL, KEY_W]
+      #
+      # BTN_LEFT:
+      #   type: command
+      #   command: "notify-send 'Left click remapped'"
+      #
+      # Supported action types:
+      #   key_combo  - simulate a keyboard shortcut (list of KEY_* codes)
+      #   command    - run a shell command
+      #
+      # Find key names with: python3 -c "from evdev import ecodes; print([k for k in dir(ecodes) if k.startswith('KEY_')])"
