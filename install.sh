@@ -17,7 +17,7 @@ if [ -n "$SUDO_USER" ]; then
     REAL_UID=$(id -u "$REAL_USER")
     REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
     ELEVATE=""           # already root
-    AS_USER="sudo -u $REAL_USER env XDG_RUNTIME_DIR=/run/user/$REAL_UID DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$REAL_UID/bus"
+    AS_USER="sudo -u $REAL_USER env PATH=$REAL_HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin XDG_RUNTIME_DIR=/run/user/$REAL_UID DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$REAL_UID/bus"
 else
     REAL_USER="$USER"
     REAL_HOME="$HOME"
@@ -32,8 +32,39 @@ echo "=== Inphic Mouse Config Installer ==="
 echo "Real user: $REAL_USER"
 echo ""
 
-# ── 1. Load uinput module ────────────────────────────────────────────
-echo "[1/5] Loading uinput kernel module..."
+# ── 1. Set up Python 3.11 venv (preferred) ────────────────────────────
+echo "[1/6] Setting up Python 3.11 environment..."
+VENV_DIR="$SCRIPT_DIR/.venv"
+VENV_PY="$VENV_DIR/bin/python"
+
+if $AS_USER which uv >/dev/null 2>&1; then
+    # Install a managed Python 3.11 and create a local venv for this project.
+    $AS_USER uv python install 3.11 >/dev/null
+
+    # evdev may need a compiler (cc) to build from source.
+    if ! command -v cc >/dev/null 2>&1; then
+        if command -v apt-get >/dev/null 2>&1; then
+            $ELEVATE apt-get update -y
+            $ELEVATE apt-get install -y build-essential
+        fi
+    fi
+
+    # Install deps from pyproject.toml via uv (creates/refreshes .venv).
+    pushd "$SCRIPT_DIR" >/dev/null
+    $AS_USER uv lock >/dev/null
+    $AS_USER uv sync --python 3.11 --locked
+    popd >/dev/null
+
+    PYTHON_BIN="$VENV_PY"
+    echo "      Using: $PYTHON_BIN ($( $AS_USER "$VENV_PY" --version ))"
+else
+    # Fallback to system python3.
+    PYTHON_BIN="python3"
+    echo "      uv not found; falling back to $PYTHON_BIN ($(python3 --version 2>/dev/null || true))"
+fi
+
+# ── 2. Load uinput module ────────────────────────────────────────────
+echo "[2/6] Loading uinput kernel module..."
 if ! lsmod | grep -q uinput; then
     $ELEVATE modprobe uinput
     echo "      uinput loaded."
@@ -47,8 +78,8 @@ if [ ! -f /etc/modules-load.d/uinput.conf ]; then
     echo "      Added uinput to modules-load.d for boot persistence."
 fi
 
-# ── 2. Create udev rules ─────────────────────────────────────────────
-echo "[2/5] Creating udev rules..."
+# ── 3. Create udev rules ─────────────────────────────────────────────
+echo "[3/6] Creating udev rules..."
 $ELEVATE tee "$UDEV_RULES" > /dev/null <<'UDEV'
 # Inphic USB Gaming Mouse - grant read access to plugdev group
 SUBSYSTEM=="input", ATTRS{idVendor}=="30fa", ATTRS{idProduct}=="1701", MODE="0660", GROUP="plugdev"
@@ -58,15 +89,15 @@ KERNEL=="uinput", MODE="0660", GROUP="plugdev"
 UDEV
 echo "      Wrote $UDEV_RULES"
 
-# ── 3. Reload udev rules ─────────────────────────────────────────────
-echo "[3/5] Reloading udev rules..."
+# ── 4. Reload udev rules ─────────────────────────────────────────────
+echo "[4/6] Reloading udev rules..."
 $ELEVATE udevadm control --reload-rules
 $ELEVATE udevadm trigger --subsystem-match=input
 $ELEVATE udevadm trigger --subsystem-match=misc  # triggers uinput if loaded
 echo "      udev rules reloaded."
 
-# ── 4. Install systemd user service ───────────────────────────────────
-echo "[4/5] Installing systemd user service..."
+# ── 5. Install systemd user service ───────────────────────────────────
+echo "[5/6] Installing systemd user service..."
 $AS_USER mkdir -p "$SERVICE_DIR"
 $AS_USER tee "$SERVICE_FILE" > /dev/null <<SYSTEMD
 [Unit]
@@ -76,22 +107,31 @@ PartOf=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=$SCRIPT_DIR/mouse_map.py -c $SCRIPT_DIR/config.yaml
+ExecStart=$PYTHON_BIN $SCRIPT_DIR/mouse_map.py -c $SCRIPT_DIR/config.yaml
 Restart=on-failure
 RestartSec=5
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target
 SYSTEMD
 echo "      Wrote $SERVICE_FILE"
 
 $AS_USER systemctl --user daemon-reload
 echo "      Reloaded systemd user daemon."
 
-# ── 5. Enable and start ──────────────────────────────────────────────
-echo "[5/5] Enabling and starting service..."
-$AS_USER systemctl --user enable --now mouse-config.service
-echo "      Service enabled and started."
+# ── 6. Enable and start ──────────────────────────────────────────────
+echo "[6/6] Enabling and starting service..."
+
+# Idempotent: disable (ignoring errors) then enable+start.
+$AS_USER systemctl --user disable mouse-config.service >/dev/null 2>&1 || true
+
+if $AS_USER systemctl --user enable --now mouse-config.service; then
+    echo "      Service enabled and started."
+else
+    echo "      Enable failed; trying restart..."
+    $AS_USER systemctl --user restart mouse-config.service
+    echo "      Service restarted."
+fi
 
 echo ""
 echo "=== Installation complete ==="
