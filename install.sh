@@ -84,6 +84,9 @@ $ELEVATE tee "$UDEV_RULES" > /dev/null <<'UDEV'
 # Inphic USB Gaming Mouse - grant read access to plugdev group
 SUBSYSTEM=="input", ATTRS{idVendor}=="30fa", ATTRS{idProduct}=="1701", MODE="0660", GROUP="plugdev"
 
+# Inphic USB device - grant access to plugdev group for software reset (exits BIOS Boot Protocol)
+SUBSYSTEM=="usb", ATTR{idVendor}=="30fa", ATTR{idProduct}=="1701", MODE="0660", GROUP="plugdev"
+
 # uinput - grant read/write access to plugdev group
 KERNEL=="uinput", MODE="0660", GROUP="plugdev"
 UDEV
@@ -93,6 +96,7 @@ echo "      Wrote $UDEV_RULES"
 echo "[4/6] Reloading udev rules..."
 $ELEVATE udevadm control --reload-rules
 $ELEVATE udevadm trigger --subsystem-match=input
+$ELEVATE udevadm trigger --subsystem-match=usb
 $ELEVATE udevadm trigger --subsystem-match=misc  # triggers uinput if loaded
 echo "      udev rules reloaded."
 

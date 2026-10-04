@@ -8,6 +8,8 @@ through a separate virtual keyboard.
 """
 
 import argparse
+import fcntl
+import glob
 import logging
 import os
 import select
@@ -43,6 +45,49 @@ class MouseMapper:
         self.grabbed: dict[int, InputDevice] = {}  # fd -> grabbed device
         self.listen: dict[int, dict] = {}          # fd -> {dev, buttons}
         self.running = False
+        self._reset_done = False
+
+    # ── usb reset ───────────────────────────────────────────────────────
+
+    def _reset_usb_device(self, vendor: int, product: int) -> bool:
+        """Perform a software USB port reset for the device matching vendor/product ID.
+        This forces the mouse to reset and exit BIOS Boot Protocol into full Report Protocol."""
+        USBDEVFS_RESET = (ord("U") << 8) | 20  # 21780
+
+        for uevent_path in Path("/sys/bus/usb/devices").glob("*/uevent"):
+            try:
+                with open(uevent_path) as f:
+                    data = dict(line.strip().split("=", 1) for line in f if "=" in line)
+                prod = data.get("PRODUCT", "")
+                if prod:
+                    parts = prod.split("/")
+                    if len(parts) >= 2:
+                        v, p = int(parts[0], 16), int(parts[1], 16)
+                        if v == vendor and p == product:
+                            devname = data.get("DEVNAME")
+                            if devname:
+                                dev_path = Path("/dev") / devname
+                                if dev_path.exists():
+                                    LOG.info("Resetting USB device at %s to exit Boot Protocol...", dev_path)
+                                    try:
+                                        fd = os.open(dev_path, os.O_WRONLY)
+                                        try:
+                                            fcntl.ioctl(fd, USBDEVFS_RESET, 0)
+                                            LOG.info("USB reset successful for %s", dev_path)
+                                            return True
+                                        finally:
+                                            os.close(fd)
+                                    except PermissionError:
+                                        LOG.warning(
+                                            "Permission denied resetting %s. "
+                                            "Make sure udev rules include SUBSYSTEM=='usb'.",
+                                            dev_path,
+                                        )
+                                    except Exception as e:
+                                        LOG.warning("Failed to reset USB device %s: %s", dev_path, e)
+            except Exception:
+                continue
+        return False
 
     # ── config ──────────────────────────────────────────────────────────
 
@@ -83,9 +128,17 @@ class MouseMapper:
 
     def _build_keyboard_caps(self) -> dict:
         mapped = self._collect_mapped_codes()
-        if not mapped:
-            mapped = {ecodes.KEY_ESC}
-        return {ecodes.EV_KEY: list(mapped)}
+        # Include standard keys so udev classifies this device as a full keyboard (ID_INPUT_KEYBOARD=1)
+        base_keys = {
+            ecodes.KEY_ESC, ecodes.KEY_ENTER, ecodes.KEY_SPACE,
+            ecodes.KEY_LEFTCTRL, ecodes.KEY_RIGHTCTRL,
+            ecodes.KEY_LEFTSHIFT, ecodes.KEY_RIGHTSHIFT,
+            ecodes.KEY_LEFTALT, ecodes.KEY_RIGHTALT,
+            ecodes.KEY_LEFTMETA, ecodes.KEY_RIGHTMETA,
+            ecodes.KEY_A, ecodes.KEY_C, ecodes.KEY_V, ecodes.KEY_Z,
+        }
+        all_keys = sorted(mapped | base_keys)
+        return {ecodes.EV_KEY: all_keys}
 
     def _build_mouse_caps(self, src_dev: InputDevice, exclude_codes: set[int]) -> dict:
         """Copy src_dev capabilities minus the excluded key codes."""
@@ -101,15 +154,17 @@ class MouseMapper:
         return caps
 
     def _open_uinput_devices(self, grabbed_dev: InputDevice, exclude_codes: set[int]):
-        # Virtual keyboard
-        kbd_caps = self._build_keyboard_caps()
-        self.vkbd = UInput(kbd_caps, name="inphic-virtual-kbd", version=0x1)
-        LOG.info("Virtual keyboard created: %s", [ecodes.KEY.get(c, _CODE_NAMES.get(c, str(c))) for c in kbd_caps.get(ecodes.EV_KEY, [])])
+        # Virtual keyboard (only create once)
+        if not self.vkbd:
+            kbd_caps = self._build_keyboard_caps()
+            self.vkbd = UInput(kbd_caps, name="inphic-virtual-kbd", version=0x1)
+            LOG.info("Virtual keyboard created: %s", [ecodes.KEY.get(c, _CODE_NAMES.get(c, str(c))) for c in kbd_caps.get(ecodes.EV_KEY, [])])
 
-        # Virtual mouse
-        mouse_caps = self._build_mouse_caps(grabbed_dev, exclude_codes)
-        self.vmouse = UInput(mouse_caps, name="inphic-virtual-mouse", version=0x1)
-        LOG.info("Virtual mouse created")
+        # Virtual mouse (only create once)
+        if not self.vmouse:
+            mouse_caps = self._build_mouse_caps(grabbed_dev, exclude_codes)
+            self.vmouse = UInput(mouse_caps, name="inphic-virtual-mouse", version=0x1)
+            LOG.info("Virtual mouse created")
 
     # ── device discovery ────────────────────────────────────────────────
 
@@ -124,10 +179,14 @@ class MouseMapper:
                 dev_cfg,
             ))
 
+        existing_paths = {d.path for d in self.grabbed.values()} | {info["dev"].path for info in self.listen.values()}
+
         for path in list_devices():
+            if path in existing_paths:
+                continue
             try:
                 dev = InputDevice(path)
-            except PermissionError:
+            except (PermissionError, OSError):
                 continue
             for vendor, product, dev_cfg in vp_pairs:
                 if dev.info.vendor == vendor and dev.info.product == product:
@@ -135,9 +194,16 @@ class MouseMapper:
                     caps = dev.capabilities()
                     # Only grab the actual pointer (REL_X), not scroll-only (REL_WHEEL)
                     if ecodes.REL_X in caps.get(ecodes.EV_REL, []):
-                        dev.grab()
-                        self.grabbed[dev.fd] = dev
-                        LOG.info("Grabbed %s (%s) on %s", name, dev.name.strip(), path)
+                        try:
+                            dev.grab()
+                            self.grabbed[dev.fd] = dev
+                            LOG.info("Grabbed %s (%s) on %s", name, dev.name.strip(), path)
+                        except OSError as e:
+                            LOG.warning("Could not grab %s (%s): %s", name, path, e)
+                            try:
+                                dev.close()
+                            except OSError:
+                                pass
                     else:
                         # Keyboard or scroll interface — listen only
                         buttons = dev_cfg.get("buttons", {})
@@ -173,40 +239,66 @@ class MouseMapper:
         signal.signal(signal.SIGINT, self._handle_signal)
         signal.signal(signal.SIGTERM, self._handle_signal)
 
+        # 1. Reset USB device on startup to pull it out of BIOS Boot Protocol into Report Protocol
+        if not self._reset_done:
+            reset_performed = False
+            for dev_cfg in self.config.get("devices", []):
+                try:
+                    v = int(dev_cfg["vendor"], 16)
+                    p = int(dev_cfg["product"], 16)
+                    if self._reset_usb_device(v, p):
+                        reset_performed = True
+                except Exception as e:
+                    LOG.debug("USB reset attempt error: %s", e)
+            if reset_performed:
+                # Give kernel and udev time to re-enumerate the device
+                time.sleep(1.0)
+            self._reset_done = True
+
         action_codes = self._collect_action_codes()
-        self._find_devices(action_codes)
-
-        if not self.grabbed and not self.listen:
-            LOG.error("No matching devices found. Is the mouse plugged in?")
-            sys.exit(1)
-
-        # Determine which codes to filter from the grabbed mouse
         exclude_codes: set[int] = set()
-        for name, codes in action_codes.items():
+        for codes in action_codes.values():
             exclude_codes.update(codes)
 
-        # Open virtual devices (use first grabbed device's caps as template)
-        if self.grabbed:
-            grabbed_dev = next(iter(self.grabbed.values()))
-            self._open_uinput_devices(grabbed_dev, exclude_codes)
-
-        # Build button lookup per device
         device_buttons: dict[int, dict] = {}
-        for fd, dev in self.grabbed.items():
-            device_buttons[fd] = {}
-            for cfg in self.config.get("devices", []):
-                device_buttons[fd].update(cfg.get("buttons", {}))
-        for fd, info in self.listen.items():
-            device_buttons[fd] = info["buttons"]
+        all_fds: set[int] = set()
 
-        all_fds = set(self.grabbed.keys()) | set(self.listen.keys())
+        def refresh_devices():
+            nonlocal all_fds
+            self._find_devices(action_codes)
+            if self.grabbed and not self.vmouse:
+                grabbed_dev = next(iter(self.grabbed.values()))
+                self._open_uinput_devices(grabbed_dev, exclude_codes)
 
-        LOG.info("Active: %d grabbed device(s), %d listen-only device(s)",
-                 len(self.grabbed), len(self.listen))
+            device_buttons.clear()
+            for fd, dev in self.grabbed.items():
+                device_buttons[fd] = {}
+                for cfg in self.config.get("devices", []):
+                    device_buttons[fd].update(cfg.get("buttons", {}))
+            for fd, info in self.listen.items():
+                device_buttons[fd] = info["buttons"]
+
+            all_fds = set(self.grabbed.keys()) | set(self.listen.keys())
+            if all_fds:
+                LOG.info(
+                    "Active: %d grabbed device(s), %d listen-only device(s)",
+                    len(self.grabbed),
+                    len(self.listen),
+                )
+
+        refresh_devices()
+
+        if not all_fds:
+            LOG.warning("No matching devices found. Waiting for mouse to be connected...")
 
         while self.running:
+            if not all_fds:
+                time.sleep(1.0)
+                refresh_devices()
+                continue
+
             try:
-                r, _, _ = select.select(all_fds, [], [], 1.0)
+                r, _, _ = select.select(list(all_fds), [], [], 1.0)
             except (OSError, ValueError):
                 break
 
@@ -214,9 +306,17 @@ class MouseMapper:
                 if fd in self.grabbed:
                     dev = self.grabbed[fd]
                     try:
-                        events = dev.read()
+                        events = tuple(dev.read())
                     except OSError:
+                        LOG.warning("Grabbed device disconnected or error (fd %d)", fd)
+                        self.grabbed.pop(fd, None)
+                        all_fds.discard(fd)
+                        try:
+                            dev.close()
+                        except Exception:
+                            pass
                         continue
+
                     for event in events:
                         if event.type == ecodes.EV_KEY and event.code in exclude_codes:
                             # Remapped button
@@ -235,9 +335,17 @@ class MouseMapper:
                 elif fd in self.listen:
                     info = self.listen[fd]
                     try:
-                        events = info["dev"].read()
+                        events = tuple(info["dev"].read())
                     except OSError:
+                        LOG.warning("Listen device disconnected or error (fd %d)", fd)
+                        self.listen.pop(fd, None)
+                        all_fds.discard(fd)
+                        try:
+                            info["dev"].close()
+                        except Exception:
+                            pass
                         continue
+
                     for event in events:
                         if event.type == ecodes.EV_KEY and event.value == 1:
                             btn_name = _CODE_NAMES.get(event.code, f"CODE_{event.code}")
