@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+      - main
+  pull_request:
+    branches:
+      - master
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint & ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Run Ruff Linter
+        run: uvx ruff check .
+
+      - name: Run Ruff Formatter Check
+        run: uvx ruff format --check .
+
+      - name: Check Shell Scripts (ShellCheck)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y shellcheck
+          shellcheck install.sh
+
+      - name: Check Bash Syntax
+        run: bash -n install.sh
+
+  test:
+    name: Tests & Package Build
+    runs-on: ubuntu-latest
+    needs: [lint]
+    strategy:
+      matrix:
+        python-version: ["3.11"]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies for evdev
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y libevdev-dev build-essential
+
+      - name: Set up uv with Python ${{ matrix.python-version }}
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Validate Python bytecode compilation
+        run: python -m py_compile mouse_map.py main.py
+
+      - name: Validate config.yaml
+        run: |
+          uv run python -c "
+          import yaml
+          with open('config.yaml') as f:
+              data = yaml.safe_load(f)
+              assert 'devices' in data, 'Missing devices key in config.yaml'
+              print('config.yaml validation passed successfully')
+          "
+
+      - name: Run Unit Tests
+        run: uv run python -m unittest discover tests
+
+      - name: Build Package Distribution (wheel & sdist)
+        run: uv build

@@ -9,12 +9,10 @@ through a separate virtual keyboard.
 
 import argparse
 import fcntl
-import glob
 import logging
 import os
 import select
 import signal
-import sys
 import time
 from pathlib import Path
 
@@ -40,10 +38,10 @@ class MouseMapper:
         self.config = {}
         self._load_config()
 
-        self.vkbd: UInput | None = None       # virtual keyboard for key combos
+        self.vkbd: UInput | None = None  # virtual keyboard for key combos
         self.vmouse: UInput | None = None  # virtual mouse for forwarding events
         self.grabbed: dict[int, InputDevice] = {}  # fd -> grabbed device
-        self.listen: dict[int, dict] = {}          # fd -> {dev, buttons}
+        self.listen: dict[int, dict] = {}  # fd -> {dev, buttons}
         self.running = False
         self._reset_done = False
 
@@ -98,10 +96,7 @@ class MouseMapper:
     def _get_code(self, name: str) -> int:
         code = getattr(ecodes, name, None)
         if code is None:
-            raise ValueError(
-                f"Unknown key code: {name}. "
-                f"Use names from evdev.ecodes (e.g. KEY_A, BTN_SIDE)"
-            )
+            raise ValueError(f"Unknown key code: {name}. Use names from evdev.ecodes (e.g. KEY_A, BTN_SIDE)")
         return code
 
     def _collect_mapped_codes(self) -> set[int]:
@@ -130,12 +125,21 @@ class MouseMapper:
         mapped = self._collect_mapped_codes()
         # Include standard keys so udev classifies this device as a full keyboard (ID_INPUT_KEYBOARD=1)
         base_keys = {
-            ecodes.KEY_ESC, ecodes.KEY_ENTER, ecodes.KEY_SPACE,
-            ecodes.KEY_LEFTCTRL, ecodes.KEY_RIGHTCTRL,
-            ecodes.KEY_LEFTSHIFT, ecodes.KEY_RIGHTSHIFT,
-            ecodes.KEY_LEFTALT, ecodes.KEY_RIGHTALT,
-            ecodes.KEY_LEFTMETA, ecodes.KEY_RIGHTMETA,
-            ecodes.KEY_A, ecodes.KEY_C, ecodes.KEY_V, ecodes.KEY_Z,
+            ecodes.KEY_ESC,
+            ecodes.KEY_ENTER,
+            ecodes.KEY_SPACE,
+            ecodes.KEY_LEFTCTRL,
+            ecodes.KEY_RIGHTCTRL,
+            ecodes.KEY_LEFTSHIFT,
+            ecodes.KEY_RIGHTSHIFT,
+            ecodes.KEY_LEFTALT,
+            ecodes.KEY_RIGHTALT,
+            ecodes.KEY_LEFTMETA,
+            ecodes.KEY_RIGHTMETA,
+            ecodes.KEY_A,
+            ecodes.KEY_C,
+            ecodes.KEY_V,
+            ecodes.KEY_Z,
         }
         all_keys = sorted(mapped | base_keys)
         return {ecodes.EV_KEY: all_keys}
@@ -158,7 +162,10 @@ class MouseMapper:
         if not self.vkbd:
             kbd_caps = self._build_keyboard_caps()
             self.vkbd = UInput(kbd_caps, name="inphic-virtual-kbd", version=0x1)
-            LOG.info("Virtual keyboard created: %s", [ecodes.KEY.get(c, _CODE_NAMES.get(c, str(c))) for c in kbd_caps.get(ecodes.EV_KEY, [])])
+            LOG.info(
+                "Virtual keyboard created: %s",
+                [ecodes.KEY.get(c, _CODE_NAMES.get(c, str(c))) for c in kbd_caps.get(ecodes.EV_KEY, [])],
+            )
 
         # Virtual mouse (only create once)
         if not self.vmouse:
@@ -173,11 +180,13 @@ class MouseMapper:
         grabbed and forwarded. Keyboard interfaces are listen-only."""
         vp_pairs = []
         for dev_cfg in self.config.get("devices", []):
-            vp_pairs.append((
-                int(dev_cfg["vendor"], 16),
-                int(dev_cfg["product"], 16),
-                dev_cfg,
-            ))
+            vp_pairs.append(
+                (
+                    int(dev_cfg["vendor"], 16),
+                    int(dev_cfg["product"], 16),
+                    dev_cfg,
+                )
+            )
 
         existing_paths = {d.path for d in self.grabbed.values()} | {info["dev"].path for info in self.listen.values()}
 
@@ -225,9 +234,12 @@ class MouseMapper:
             self.vkbd.syn()
         elif action == "command":
             import subprocess
+
             subprocess.Popen(
-                button_cfg["command"], shell=True,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                button_cfg["command"],
+                shell=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
         else:
             LOG.warning("Unknown action type: %s", action)
@@ -328,9 +340,7 @@ class MouseMapper:
                             # suppress (don't forward to virtual mouse)
                         elif self.vmouse:
                             # Forward everything else to virtual mouse
-                            self.vmouse.write(
-                                event.type, event.code, event.value
-                            )
+                            self.vmouse.write(event.type, event.code, event.value)
 
                 elif fd in self.listen:
                     info = self.listen[fd]
@@ -386,7 +396,8 @@ class MouseMapper:
 def main():
     parser = argparse.ArgumentParser(description="Inphic Mouse Button Remapper")
     parser.add_argument(
-        "-c", "--config",
+        "-c",
+        "--config",
         default=str(Path(__file__).parent / "config.yaml"),
         help="Path to config file",
     )
